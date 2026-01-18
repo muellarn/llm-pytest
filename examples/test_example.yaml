@@ -1,0 +1,53 @@
+test:
+  name: "HTTP API Example"
+  description: |
+    A simple example test that demonstrates the llm-pytest framework
+    by making HTTP requests and checking responses.
+  tags: ["example", "api"]
+  timeout: 60
+
+steps:
+  - name: "Make GET request to httpbin"
+    tool: llm_pytest.http_get
+    args:
+      url: "https://httpbin.org/get"
+    save_as: get_response
+    expect: |
+      The response should contain:
+      - status_code: 200
+      - body contains "origin" (the client IP)
+      - headers contain "Content-Type: application/json"
+
+  - name: "Make POST request to httpbin"
+    tool: llm_pytest.http_post
+    args:
+      url: "https://httpbin.org/post"
+      data:
+        test: "hello"
+        number: 42
+    save_as: post_response
+    expect: |
+      The response should contain:
+      - status_code: 200
+      - body contains the data we sent (test: hello, number: 42)
+
+  - name: "Compare values with tolerance"
+    tool: llm_pytest.compare_values
+    args:
+      value1: 100
+      value2: 105
+      tolerance: 0.1
+    expect: |
+      The comparison should pass because:
+      - 5% difference is within 10% tolerance
+
+verdict:
+  pass_if: |
+    - Both HTTP requests returned status 200
+    - POST request echoed our data correctly
+    - Value comparison passed within tolerance
+
+  fail_if: |
+    - Any HTTP request failed
+    - Response data was incorrect
+    - Value comparison failed

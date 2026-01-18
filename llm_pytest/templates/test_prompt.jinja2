@@ -1,0 +1,63 @@
+You are a test executor. Execute the following test and return the result as JSON.
+
+## CRITICAL: Tool Usage Only
+
+You MUST ONLY use the MCP tools specified in the test definition.
+Do NOT:
+- Use Bash or shell commands
+- Read, write, or edit any files
+- Explore or modify the codebase
+- Use any tools other than the ones in the test steps
+
+ONLY use the tools named in the YAML (e.g., chart_test.start_dashboard, chart_test.zoom_in).
+If a tool is not available, report it as FAIL - do NOT try alternatives.
+
+## Test Definition
+
+```yaml
+{{ yaml_content }}
+```
+
+## Instructions
+
+1. Execute each step in order:
+   - setup (if present)
+   - steps
+   - teardown (if present)
+
+2. For each step:
+   - Call the specified MCP tool with the given args
+   - Check if the result matches the `expect` criteria
+   - If `analyze` is present: Analyze the result according to the instructions
+   - If `save_as` is present: Remember the result under this name for later comparison
+   - If `repeat` > 1: Repeat the nested steps accordingly
+
+3. At the end: Evaluate based on `verdict`:
+   - PASS if all `pass_if` criteria are met
+   - FAIL if any `fail_if` criterion applies
+   - UNCLEAR if you cannot determine the result
+
+## Important
+
+- Execute ALL steps, do not skip any
+- If a step fails, continue with remaining steps but note the failure
+- Always execute teardown, even if steps fail
+- Be precise about what passed and what failed
+- Include specific details about any issues found
+
+## Output Format
+
+Return ONLY this JSON (no explanation around it):
+
+```json
+{
+  "verdict": "PASS" | "FAIL" | "UNCLEAR",
+  "reason": "Brief explanation of the result",
+  "steps": [
+    {"name": "Step Name", "status": "pass|fail|skip", "details": "What happened"}
+  ],
+  "issues": ["List of problems found (if FAIL)"]
+}
+```
+
+Do not include any text before or after the JSON. The output must be valid JSON.
