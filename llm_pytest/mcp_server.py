@@ -11,9 +11,11 @@ The server is started automatically by the test runner.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import functools
 import importlib.util
 import inspect
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,38 @@ class UnifiedMCPServer:
         self.project_root = project_root or Path.cwd()
         self.plugins: list[LLMPlugin] = []
         self._mcp: FastMCP | None = None
+        self._cleanup_registered: bool = False
+
+    def _register_cleanup_handlers(self) -> None:
+        """Register cleanup for all exit scenarios (normal, SIGTERM, SIGINT)."""
+        if self._cleanup_registered:
+            return
+
+        atexit.register(self._sync_cleanup)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        self._cleanup_registered = True
+
+    def _signal_handler(self, signum: int, frame) -> None:
+        """Handle termination signals by running cleanup."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self.cleanup())
+            else:
+                loop.run_until_complete(self.cleanup())
+        except Exception:
+            pass
+        sys.exit(128 + signum)
+
+    def _sync_cleanup(self) -> None:
+        """Synchronous wrapper for atexit."""
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_closed():
+                loop.run_until_complete(self.cleanup())
+        except Exception:
+            pass
 
     def discover_plugins(self) -> list[LLMPlugin]:
         """Discover and load plugins from tests/llm/plugins/.
@@ -115,6 +149,9 @@ class UnifiedMCPServer:
         self.plugins = self.discover_plugins()
         for plugin in self.plugins:
             self._register_plugin_methods(plugin)
+
+        # Register cleanup handlers for graceful shutdown
+        self._register_cleanup_handlers()
 
         return self._mcp
 
@@ -222,12 +259,15 @@ class UnifiedMCPServer:
             self._mcp.tool(name=tool_name)(method)
 
     async def cleanup(self) -> None:
-        """Cleanup all plugins."""
+        """Cleanup all plugins with timeout protection."""
         for plugin in self.plugins:
             try:
-                await plugin.cleanup()
+                await asyncio.wait_for(plugin.cleanup(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Use print here since logger may not be available during shutdown
+                print(f"[llm-pytest] WARNING: Plugin {plugin.name} cleanup timed out")
             except Exception as e:
-                print(f"Warning: Plugin cleanup failed: {e}")
+                print(f"[llm-pytest] WARNING: Plugin {plugin.name} cleanup failed: {e}")
 
 
 def run_server(project_root: str | None = None) -> None:
