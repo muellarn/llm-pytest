@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,11 +13,9 @@ from pathlib import Path
 
 from jinja2 import Environment, PackageLoader
 
+from .formatter import OutputFormatter
 from .logging import (
     configure_logging,
-    log_claude_output,
-    log_tool_call,
-    log_tool_result,
     logger,
 )
 from .models import TestSpec, Verdict
@@ -100,7 +99,6 @@ def run_llm_test(
     spec: TestSpec,
     yaml_path: Path,
     timeout: int | None = None,
-    verbose: bool = False,
 ) -> Verdict:
     """Run a test via Claude Code subprocess.
 
@@ -114,7 +112,6 @@ def run_llm_test(
         spec: The parsed test specification
         yaml_path: Path to the YAML test file
         timeout: Timeout in seconds (overrides spec.test.timeout)
-        verbose: Whether to print verbose output
 
     Returns:
         Verdict object with test results
@@ -146,28 +143,26 @@ def run_llm_test(
             issues=[str(e)],
         )
 
-    # Configure logging based on verbose flag
-    configure_logging(verbose=verbose)
+    # Configure logging
+    configure_logging(verbose=True)
 
     # Use RunnerContext for thread-safe MCP config management
     with RunnerContext.create(yaml_path) as ctx:
-        if verbose:
-            logger.info("Running test: %s", spec.test.name)
-            logger.info("Timeout: %ss", effective_timeout)
-            logger.info("Project root: %s", ctx.project_root)
-            logger.info("MCP config: %s", ctx.mcp_config_path)
+        logger.info("Running test: %s", spec.test.name)
+        logger.info("Timeout: %ss", effective_timeout)
+        logger.info("Project root: %s", ctx.project_root)
+        logger.info("MCP config: %s", ctx.mcp_config_path)
 
         # Check if plugins exist
         plugins_dir = ctx.project_root / "tests" / "llm" / "plugins"
         if plugins_dir.exists():
             plugins = list(plugins_dir.glob("*.py"))
             plugins = [p for p in plugins if not p.name.startswith("_")]
-            if verbose and plugins:
+            if plugins:
                 logger.info("Found plugins: %s", [p.stem for p in plugins])
 
-        if verbose:
-            logger.info("Starting Claude Code...")
-            logger.info("-" * 60)
+        logger.info("Starting Claude Code...")
+        logger.info("-" * 60)
 
         # Build Claude command with MCP config
         # Allow all MCP tools from llm_pytest server
@@ -178,126 +173,140 @@ def run_llm_test(
             "--allowedTools", "mcp__llm_pytest__*",  # Allow all llm_pytest MCP tools
         ]
 
-        # Call Claude Code
+        # Call Claude Code with stream-json for real-time output
+        #
+        # CRITICAL: Claude Code CLI stdin behavior
+        # =========================================
+        # The Claude Code CLI hangs indefinitely if stdin is not closed.
+        # This is because the CLI waits for potential user input even when
+        # running non-interactively. Always use stdin=subprocess.DEVNULL
+        # or explicitly close stdin after process creation.
+        #
+        # Symptoms of this bug:
+        # - Test hangs forever with no output
+        # - Process doesn't respond to timeout
+        # - Works fine when run manually in terminal
+        #
+        # See: https://github.com/anthropics/claude-code/issues/1292
         try:
-            if verbose:
-                # Use stream-json for real-time output
-                #
-                # CRITICAL: Claude Code CLI stdin behavior
-                # =========================================
-                # The Claude Code CLI hangs indefinitely if stdin is not closed.
-                # This is because the CLI waits for potential user input even when
-                # running non-interactively. Always use stdin=subprocess.DEVNULL
-                # or explicitly close stdin after process creation.
-                #
-                # Symptoms of this bug:
-                # - Test hangs forever with no output
-                # - Process doesn't respond to timeout
-                # - Works fine when run manually in terminal
-                #
-                # See: https://github.com/anthropics/claude-code/issues/1292
-                process = subprocess.Popen(
-                    base_cmd + ["--output-format", "stream-json", "--verbose"],
-                    stdin=subprocess.DEVNULL,  # CRITICAL: prevents CLI hang
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=ctx.project_root,  # Run from project root so plugins are found
-                    bufsize=1,  # Line buffered
+            process = subprocess.Popen(
+                base_cmd + ["--output-format", "stream-json", "--verbose"],
+                stdin=subprocess.DEVNULL,  # CRITICAL: prevents CLI hang
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=ctx.project_root,  # Run from project root so plugins are found
+                bufsize=1,  # Line buffered
+            )
+
+            final_result = None
+            assistant_text = []
+            formatter = OutputFormatter()
+
+            # Read NDJSON lines in real-time
+            try:
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        event = json.loads(line)
+                        event_type = event.get("type", "")
+
+                        if event_type == "system" and event.get("subtype") == "init":
+                            logger.info("Session started")
+
+                        elif event_type == "assistant":
+                            # Extract text and tool_use from assistant message
+                            msg = event.get("message", {})
+                            content = msg.get("content", [])
+                            for block in content:
+                                block_type = block.get("type")
+                                if block_type == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        # Log Claude's text with formatter
+                                        formatted = formatter.claude_text(text)
+                                        if formatted:
+                                            print(formatted, flush=True)
+                                        assistant_text.append(text)
+                                elif block_type == "tool_use":
+                                    tool_name = block.get("name", "unknown")
+                                    tool_input = block.get("input", {})
+                                    # Buffer tool call - will be printed with result
+                                    formatter.tool_call(tool_name, tool_input)
+
+                        elif event_type == "user":
+                            # Tool results come in "user" events with tool_use_result
+                            tool_result_content = event.get("tool_use_result", "")
+                            if tool_result_content:
+                                # Normalize to string for error check
+                                content_str = (
+                                    tool_result_content
+                                    if isinstance(tool_result_content, str)
+                                    else json.dumps(tool_result_content)
+                                )
+                                is_error = "error" in content_str.lower()
+                                line_out = formatter.tool_result(content_str, is_error)
+                                print(line_out, flush=True)
+
+                        elif event_type == "result":
+                            final_result = event.get("result", "")
+                            duration = event.get("duration_ms", 0) / 1000
+                            logger.info("Completed in %.1fs", duration)
+
+                            # Display verdict from final result
+                            if final_result:
+                                try:
+                                    verdict_data = json.loads(final_result)
+                                    if isinstance(verdict_data, dict) and "verdict" in verdict_data:
+                                        v = verdict_data.get("verdict", "UNCLEAR")
+                                        r = verdict_data.get("reason", "")
+                                        for vline in formatter.verdict(v, r):
+                                            print(vline, flush=True)
+                                except (json.JSONDecodeError, TypeError):
+                                    # Try to extract JSON from markdown code block
+                                    json_match = re.search(
+                                        r'```json\s*(\{[\s\S]*?"verdict"[\s\S]*?\})\s*```',
+                                        final_result
+                                    )
+                                    if json_match:
+                                        try:
+                                            verdict_data = json.loads(json_match.group(1))
+                                            v = verdict_data.get("verdict", "UNCLEAR")
+                                            r = verdict_data.get("reason", "")
+                                            for vline in formatter.verdict(v, r):
+                                                print(vline, flush=True)
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
+
+                    except json.JSONDecodeError:
+                        # Not JSON, print as-is
+                        print(f"[raw] {line}", flush=True)
+
+                returncode = process.wait(timeout=effective_timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return Verdict(
+                    verdict="FAIL",
+                    reason=f"Test timed out after {effective_timeout} seconds",
+                    steps=[],
+                    issues=[f"Timeout: {effective_timeout}s exceeded"],
                 )
 
-                final_result = None
-                assistant_text = []
+            logger.info("-" * 60)
+            logger.info("Claude exit code: %s", returncode)
 
-                # Read NDJSON lines in real-time
-                try:
-                    for line in process.stdout:
-                        line = line.strip()
-                        if not line:
-                            continue
+            # Create result-like object
+            class Result:
+                pass
 
-                        try:
-                            event = json.loads(line)
-                            event_type = event.get("type", "")
-
-                            if event_type == "system" and event.get("subtype") == "init":
-                                logger.info("Session started")
-
-                            elif event_type == "assistant":
-                                # Extract text and tool_use from assistant message
-                                msg = event.get("message", {})
-                                content = msg.get("content", [])
-                                for block in content:
-                                    block_type = block.get("type")
-                                    if block_type == "text":
-                                        text = block.get("text", "")
-                                        if text:
-                                            # Log a preview of the response
-                                            preview = text[:200] + "..." if len(text) > 200 else text
-                                            log_claude_output(preview)
-                                            assistant_text.append(text)
-                                    elif block_type == "tool_use":
-                                        tool_name = block.get("name", "unknown")
-                                        tool_input = block.get("input", {})
-                                        # Show tool call with truncated input
-                                        input_str = json.dumps(tool_input, ensure_ascii=False)
-                                        if len(input_str) > 100:
-                                            input_str = input_str[:100] + "..."
-                                        log_tool_call(tool_name, input_str)
-
-                            elif event_type == "tool_result":
-                                # Show tool result status
-                                is_error = event.get("is_error", False)
-                                content = event.get("content", "")
-                                if isinstance(content, str):
-                                    preview = content[:150] + "..." if len(content) > 150 else content
-                                else:
-                                    preview = str(content)[:150]
-                                status = "ERROR" if is_error else "OK"
-                                log_tool_result(status, preview)
-
-                            elif event_type == "result":
-                                final_result = event.get("result", "")
-                                duration = event.get("duration_ms", 0) / 1000
-                                logger.info("Completed in %.1fs", duration)
-
-                        except json.JSONDecodeError:
-                            # Not JSON, log as-is
-                            log_claude_output(line)
-
-                    returncode = process.wait(timeout=effective_timeout)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    return Verdict(
-                        verdict="FAIL",
-                        reason=f"Test timed out after {effective_timeout} seconds",
-                        steps=[],
-                        issues=[f"Timeout: {effective_timeout}s exceeded"],
-                    )
-
-                logger.info("-" * 60)
-                logger.info("Claude exit code: %s", returncode)
-
-                # Create result-like object
-                class Result:
-                    pass
-
-                result = Result()
-                result.returncode = returncode
-                # Use final_result if available, otherwise join assistant text
-                result.stdout = final_result if final_result else "\n".join(assistant_text)
-                result.stderr = ""
-            else:
-                # Non-verbose: capture output silently with JSON format
-                # See verbose block above for explanation of stdin=DEVNULL
-                result = subprocess.run(
-                    base_cmd + ["--output-format", "json"],
-                    stdin=subprocess.DEVNULL,  # CRITICAL: prevents CLI hang (see above)
-                    capture_output=True,
-                    text=True,
-                    timeout=effective_timeout,
-                    cwd=ctx.project_root,
-                )
+            result = Result()
+            result.returncode = returncode
+            # Use final_result if available, otherwise join assistant text
+            result.stdout = final_result if final_result else "\n".join(assistant_text)
+            result.stderr = ""
         except subprocess.TimeoutExpired:
             return Verdict(
                 verdict="FAIL",
@@ -320,10 +329,8 @@ def run_llm_test(
                 issues=[str(e)],
             )
 
-        if verbose:
-            logger.info("Claude exit code: %s", result.returncode)
-            if result.stderr:
-                logger.warning("stderr: %s", result.stderr[:500])
+        if result.stderr:
+            logger.warning("stderr: %s", result.stderr[:500])
 
         if result.returncode != 0:
             return Verdict(
@@ -356,8 +363,6 @@ def run_llm_test(
 
         except json.JSONDecodeError as e:
             # Try to extract JSON from the output (Claude might include text)
-            import re
-
             json_match = re.search(r"\{[\s\S]*\"verdict\"[\s\S]*\}", result.stdout)
             if json_match:
                 try:

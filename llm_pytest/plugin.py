@@ -17,20 +17,8 @@ if TYPE_CHECKING:
 
 
 def pytest_addoption(parser: Parser) -> None:
-    """Add --llm option to pytest."""
+    """Add LLM test options to pytest."""
     group = parser.getgroup("llm", "LLM-orchestrated testing")
-    group.addoption(
-        "--llm",
-        action="store_true",
-        default=False,
-        help="Run LLM-orchestrated tests (tests/llm/*.yaml)",
-    )
-    group.addoption(
-        "--llm-verbose",
-        action="store_true",
-        default=False,
-        help="Show detailed LLM output during test execution",
-    )
     group.addoption(
         "--llm-timeout",
         type=int,
@@ -39,20 +27,71 @@ def pytest_addoption(parser: Parser) -> None:
     )
 
 
+def _is_llm_test_file(file_path: Path) -> bool:
+    """Check if a YAML file is an llm-pytest test by validating its structure.
+
+    An llm-pytest test file must have:
+    - 'test' key with 'name' subkey
+    - 'steps' key (list)
+    - 'verdict' key with 'pass_if' and 'fail_if' subkeys
+    """
+    if file_path.suffix != ".yaml":
+        return False
+
+    try:
+        content = yaml.safe_load(file_path.read_text())
+        if not isinstance(content, dict):
+            return False
+
+        # Check required top-level keys
+        if "test" not in content or "steps" not in content or "verdict" not in content:
+            return False
+
+        # Check 'test' has 'name'
+        test = content.get("test", {})
+        if not isinstance(test, dict) or "name" not in test:
+            return False
+
+        # Check 'verdict' has required keys
+        verdict = content.get("verdict", {})
+        if not isinstance(verdict, dict):
+            return False
+        if "pass_if" not in verdict or "fail_if" not in verdict:
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
 def pytest_collect_file(parent: pytest.Collector, file_path: Path) -> LLMTestFile | None:
-    """Collect YAML files from tests/llm/ directory."""
-    if file_path.suffix == ".yaml" and "llm" in file_path.parts:
-        if parent.config.getoption("--llm"):
-            return LLMTestFile.from_parent(parent, path=file_path)
+    """Collect YAML files that match llm-pytest test format."""
+    if _is_llm_test_file(file_path):
+        return LLMTestFile.from_parent(parent, path=file_path)
     return None
 
 
 def pytest_configure(config: Config) -> None:
-    """Register custom markers and configure output capture."""
+    """Register custom markers."""
     config.addinivalue_line(
         "markers",
-        "llm: mark test as LLM-orchestrated (requires --llm flag)",
+        "llm: mark test as LLM-orchestrated",
     )
+    # Register common tags as markers to prevent warnings
+    # These are dynamically registered from YAML test files
+    common_tags = [
+        "zoom",
+        "cache",
+        "dataloader",
+        "no-browser",
+        "resolution",
+        "symmetry",
+        "validation",
+        "data",
+        "chart",
+    ]
+    for tag in common_tags:
+        config.addinivalue_line("markers", f"{tag}: LLM test tag")
 
 
 
@@ -83,32 +122,27 @@ class LLMTestItem(pytest.Item):
         super().__init__(name, parent)
         self.spec = spec
         self.add_marker(pytest.mark.llm)
-
-        # Add tag-based markers
-        for tag in spec.test.tags:
-            self.add_marker(pytest.mark.skip(reason=f"tag:{tag}") if False else getattr(pytest.mark, tag, lambda: None)())
+        # Store tags for filtering but don't add as pytest markers
+        # to avoid warnings for unregistered markers
+        self._tags = spec.test.tags
 
     def runtest(self) -> None:
         """Execute test via Claude Code subprocess."""
         # Get timeout override if specified
         timeout_override = self.config.getoption("--llm-timeout")
-        verbose = self.config.getoption("--llm-verbose")
 
         timeout = timeout_override if timeout_override else self.spec.test.timeout
 
-        # Suspend capture if verbose mode
-        capman = None
-        if verbose:
-            capman = self.config.pluginmanager.getplugin("capturemanager")
-            if capman:
-                capman.suspend_global_capture(in_=True)
+        # Always suspend capture for real-time output
+        capman = self.config.pluginmanager.getplugin("capturemanager")
+        if capman:
+            capman.suspend_global_capture(in_=True)
 
         try:
             verdict = run_llm_test(
                 self.spec,
                 self.path,
                 timeout=timeout,
-                verbose=verbose,
             )
         finally:
             # Resume capture

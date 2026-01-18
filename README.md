@@ -153,17 +153,14 @@ verdict:
 ### 2. Run the test
 
 ```bash
-# Run all LLM tests
-pytest tests/llm/ --llm -v
-
-# With verbose output (shows tool calls)
-pytest tests/llm/ --llm --llm-verbose
+# Run all LLM tests (auto-detected by YAML format)
+pytest tests/llm/ -v
 
 # Override timeout
-pytest tests/llm/ --llm --llm-timeout 300
+pytest --llm-timeout 300 tests/llm/
 ```
 
-**Note:** No manual MCP server registration required! The framework automatically creates a temporary MCP config and passes it to Claude.
+**Note:** No manual MCP server registration required! The framework automatically creates a temporary MCP config and passes it to Claude. Tests are auto-detected by their YAML structure (no `--llm` flag needed).
 
 ## Test Format
 
@@ -529,9 +526,9 @@ verdict:
 
 | Option | Description |
 |--------|-------------|
-| `--llm` | Enable LLM test collection |
-| `--llm-verbose` | Show detailed output during test execution |
 | `--llm-timeout N` | Override default timeout (seconds) |
+
+LLM tests are **automatically detected** by their YAML structure. Any `.yaml` file with `test`, `steps`, and `verdict` keys is recognized as an llm-pytest test.
 
 ## Architecture
 
@@ -561,8 +558,8 @@ The framework is LLM-agnostic with a pluggable provider architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ pytest --llm tests/llm/                                      │
-│ Discovers tests/llm/*.yaml files                             │
+│ pytest tests/llm/                                            │
+│ Auto-discovers *.yaml files with llm-pytest structure        │
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼
@@ -611,12 +608,12 @@ The framework is designed for parallel test execution with pytest-xdist:
 
 ```bash
 # Run tests in parallel
-pytest tests/llm/ --llm -n auto
+pytest tests/llm/ -n auto
 ```
 
 ## How It Works (Detailed)
 
-1. **pytest discovers YAML files** when `--llm` flag is used
+1. **pytest auto-discovers YAML files** by validating their structure (must have `test`, `steps`, `verdict` keys)
 2. **YAML schema validation** ensures test files are correctly formatted
 3. **For each test file**, llm-pytest:
    - Parses YAML into `TestSpec` model with validation
@@ -773,19 +770,28 @@ Check that:
 - `retry: 3` means 3 retry attempts (4 total attempts)
 - Check that `retry_delay` is a number, not a string
 
-### Verbose debugging
+### Debugging test execution
 
-Use `--llm-verbose` to see all tool calls and results:
+Run with pytest `-v` flag to see tool calls and results in real-time:
 ```bash
-pytest tests/llm/test_example.yaml --llm -v --llm-verbose
+pytest tests/llm/test_example.yaml -v
 ```
 
 Output shows:
 ```
-[tool] mcp__llm_pytest__my_api_create_user({"name": "Alice", "email": "alice@example.com"})
-[tool result] OK: {"id": 42, "name": "Alice", "email": "alice@example.com"}
-[tool] mcp__llm_pytest__store_value({"name": "user_id", "value": 42})
-[interpolate] ${stored.user_id} -> 42
+Running test: User Creation Test
+Timeout: 30s
+Project root: /path/to/project
+Found plugins: ['my_api']
+Starting Claude Code...
+------------------------------------------------------------
+  ✓ my_api_create_user({"name": "Alice"}) → id: 42, created
+  ✓ store_value({"name": "user_id", "value": 42}) → stored
+------------------------------------------------------------
+
+============================================================
+  ✅ VERDICT: PASS
+============================================================
 ```
 
 ## Advantages
