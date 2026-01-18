@@ -1,53 +1,63 @@
 test:
-  name: "HTTP API Example"
+  name: "User Management Example"
   description: |
     A simple example test that demonstrates the llm-pytest framework
-    by making HTTP requests and checking responses.
+    by testing a hypothetical user management API.
+
+    Note: This example uses a fictional 'user_api' plugin.
+    In real tests, you would create this plugin in tests/llm/plugins/.
   tags: ["example", "api"]
   timeout: 60
 
 steps:
-  - name: "Make GET request to httpbin"
-    tool: llm_pytest.http_get
+  - name: "Create a new user"
+    tool: user_api_create
     args:
-      url: "https://httpbin.org/get"
-    save_as: get_response
+      name: "Alice"
+      email: "alice@example.com"
+    save_as: created_user
     expect: |
       The response should contain:
-      - status_code: 200
-      - body contains "origin" (the client IP)
-      - headers contain "Content-Type: application/json"
+      - A newly created user with an ID
+      - The name and email we provided
+      - A created_at timestamp
+    analyze: |
+      Check the returned user data:
+      1. Is there a valid numeric ID?
+      2. Does the name match "Alice"?
+      3. Is the email properly formatted?
+      4. Is created_at a valid timestamp?
 
-  - name: "Make POST request to httpbin"
-    tool: llm_pytest.http_post
+  - name: "Fetch the created user"
+    tool: user_api_get
     args:
-      url: "https://httpbin.org/post"
-      data:
-        test: "hello"
-        number: 42
-    save_as: post_response
+      user_id: ${created_user.id}
+    save_as: fetched_user
     expect: |
-      The response should contain:
-      - status_code: 200
-      - body contains the data we sent (test: hello, number: 42)
+      The fetched user should match the created user:
+      - Same ID, name, and email
+      - The data should be consistent
 
-  - name: "Compare values with tolerance"
-    tool: llm_pytest.compare_values
+  - name: "Store user ID for later"
+    tool: store_value
     args:
-      value1: 100
-      value2: 105
-      tolerance: 0.1
-    expect: |
-      The comparison should pass because:
-      - 5% difference is within 10% tolerance
+      name: "test_user_id"
+      value: ${created_user.id}
+    expect: "Value should be stored successfully"
+
+  - name: "Verify stored value"
+    tool: get_value
+    args:
+      name: "test_user_id"
+    expect: "Should return the stored user ID"
 
 verdict:
   pass_if: |
-    - Both HTTP requests returned status 200
-    - POST request echoed our data correctly
-    - Value comparison passed within tolerance
+    - User was created with valid data
+    - Fetched user matches created user
+    - State persistence works correctly
 
   fail_if: |
-    - Any HTTP request failed
-    - Response data was incorrect
-    - Value comparison failed
+    - User creation failed
+    - Data inconsistency between create and fetch
+    - State persistence failed

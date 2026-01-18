@@ -81,9 +81,9 @@ class TestStep:
         """Step with all fields specified."""
         step = Step(
             name="API Call",
-            tool="http_get",
-            args={"url": "http://example.com", "headers": {"X-Custom": "value"}},
-            expect="Should return 200",
+            tool="my_plugin_fetch",
+            args={"endpoint": "/api/data", "headers": {"X-Custom": "value"}},
+            expect="Should return data",
             analyze="Check response body contains expected data",
             save_as="api_response",
             repeat=3,
@@ -92,9 +92,9 @@ class TestStep:
             timeout=30,
         )
         assert step.name == "API Call"
-        assert step.tool == "http_get"
-        assert step.args == {"url": "http://example.com", "headers": {"X-Custom": "value"}}
-        assert step.expect == "Should return 200"
+        assert step.tool == "my_plugin_fetch"
+        assert step.args == {"endpoint": "/api/data", "headers": {"X-Custom": "value"}}
+        assert step.expect == "Should return data"
         assert step.analyze == "Check response body contains expected data"
         assert step.save_as == "api_response"
         assert step.repeat == 3

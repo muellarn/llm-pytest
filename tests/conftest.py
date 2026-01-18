@@ -25,9 +25,9 @@ def sample_test_yaml() -> dict[str, Any]:
         "steps": [
             {
                 "name": "Step 1",
-                "tool": "http_get",
-                "args": {"url": "http://example.com"},
-                "expect": "Should return 200",
+                "tool": "my_plugin_action",
+                "args": {"param": "value"},
+                "expect": "Should succeed",
             }
         ],
         "verdict": {
@@ -114,8 +114,8 @@ def step_with_retry_yaml() -> dict[str, Any]:
         "steps": [
             {
                 "name": "Flaky Step",
-                "tool": "http_get",
-                "args": {"url": "http://flaky.example.com"},
+                "tool": "external_api_call",
+                "args": {"endpoint": "/data"},
                 "expect": "Should eventually succeed",
                 "retry": 3,
                 "retry_delay": 2.0,

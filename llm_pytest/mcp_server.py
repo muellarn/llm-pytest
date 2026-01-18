@@ -1,7 +1,7 @@
 """Unified MCP server that loads all plugins.
 
 This module provides:
-1. Built-in tools (http, sleep, assert, etc.)
+1. Built-in tools (state management, sleep)
 2. Dynamic loading of project plugins from tests/llm/plugins/
 3. Automatic tool registration
 
@@ -156,82 +156,38 @@ class UnifiedMCPServer:
         return self._mcp
 
     def _register_builtin_tools(self) -> None:
-        """Register built-in framework tools."""
+        """Register built-in framework tools.
+
+        Built-in tools are minimal - only state management and timing.
+        All other functionality should be provided by plugins.
+        """
         mcp = self._mcp
 
-        @mcp.tool()
-        async def http_get(url: str, headers: dict | None = None) -> dict:
-            """Make HTTP GET request."""
-            import httpx
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers or {})
-                return {
-                    "status_code": response.status_code,
-                    "body": response.text[:10000],
-                    "headers": dict(response.headers),
-                }
+        # State management - shared storage for test state
+        _state: dict[str, Any] = {}
 
         @mcp.tool()
-        async def http_post(
-            url: str, data: dict | None = None, headers: dict | None = None
-        ) -> dict:
-            """Make HTTP POST request."""
-            import httpx
+        async def store_value(name: str, value: Any) -> dict:
+            """Store a value with a name for later retrieval."""
+            _state[name] = value
+            return {"stored": name, "value": value}
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=data, headers=headers or {})
-                return {
-                    "status_code": response.status_code,
-                    "body": response.text[:10000],
-                    "headers": dict(response.headers),
-                }
+        @mcp.tool()
+        async def get_value(name: str, default: Any = None) -> dict:
+            """Retrieve a stored value by name."""
+            value = _state.get(name, default)
+            return {"name": name, "value": value, "found": name in _state}
+
+        @mcp.tool()
+        async def list_values() -> dict:
+            """List all stored value names."""
+            return {"keys": list(_state.keys()), "count": len(_state)}
 
         @mcp.tool()
         async def sleep(seconds: float) -> dict:
             """Wait for specified seconds."""
             await asyncio.sleep(seconds)
             return {"slept": seconds}
-
-        @mcp.tool()
-        async def assert_equals(actual: Any, expected: Any, message: str = "") -> dict:
-            """Assert that two values are equal."""
-            passed = actual == expected
-            return {
-                "passed": passed,
-                "actual": actual,
-                "expected": expected,
-                "message": message if not passed else "OK",
-            }
-
-        @mcp.tool()
-        async def assert_true(condition: bool, message: str = "") -> dict:
-            """Assert that a condition is true."""
-            return {
-                "passed": bool(condition),
-                "message": message if not condition else "OK",
-            }
-
-        @mcp.tool()
-        async def compare_values(
-            value1: Any, value2: Any, tolerance: float = 0.0
-        ) -> dict:
-            """Compare two values with optional tolerance for numbers."""
-            if isinstance(value1, (int, float)) and isinstance(value2, (int, float)):
-                if tolerance > 0 and value2 != 0:
-                    diff_percent = abs(value1 - value2) / abs(value2)
-                    return {
-                        "equal": diff_percent <= tolerance,
-                        "value1": value1,
-                        "value2": value2,
-                        "difference_percent": diff_percent * 100,
-                        "tolerance_percent": tolerance * 100,
-                    }
-            return {
-                "equal": value1 == value2,
-                "value1": value1,
-                "value2": value2,
-            }
 
     def _register_plugin_methods(self, plugin: LLMPlugin) -> None:
         """Register all async methods from a plugin as MCP tools.

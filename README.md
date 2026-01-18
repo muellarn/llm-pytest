@@ -39,7 +39,7 @@ analyze: |
 **BAD - Just checking for success (LLM learns nothing):**
 ```yaml
 - name: "Fetch users"
-  tool: api.get_users
+  tool: api_get_users
   args: {limit: 10}
   expect: "Request should complete"
 ```
@@ -47,7 +47,7 @@ analyze: |
 **GOOD - LLM analyzes the actual output:**
 ```yaml
 - name: "Fetch users"
-  tool: api.get_users
+  tool: api_get_users
   args: {limit: 10}
   expect: "Response should contain exactly 10 users with valid data"
   analyze: |
@@ -118,11 +118,10 @@ The LLM then analyzes this data and can spot issues like:
 ## Installation
 
 ```bash
-pip install -e llm-pytest
+pip install llm-pytest
 
-# For browser tests (optional)
-pip install playwright
-playwright install chromium
+# Or for development
+pip install -e llm-pytest
 ```
 
 ## Quick Start
@@ -133,20 +132,22 @@ Create `tests/llm/test_example.yaml`:
 
 ```yaml
 test:
-  name: "API Health Check"
-  description: "Verify the API is responding"
+  name: "User Creation Test"
+  description: "Verify user creation works correctly"
   timeout: 30
 
 steps:
-  - name: "Check health endpoint"
-    tool: http_get
+  - name: "Create a user"
+    tool: my_api_create_user
     args:
-      url: "http://localhost:8000/health"
-    expect: "status_code should be 200"
+      name: "Alice"
+      email: "alice@example.com"
+    save_as: created_user
+    expect: "User should be created with valid ID and timestamp"
 
 verdict:
-  pass_if: "Health endpoint returns 200"
-  fail_if: "Health endpoint is unreachable or returns error"
+  pass_if: "User was created with correct data"
+  fail_if: "User creation failed or data is invalid"
 ```
 
 ### 2. Run the test
@@ -205,7 +206,7 @@ verdict:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | No | Human-readable step description |
-| `tool` | Yes | Tool to invoke (e.g., `http_get`, `my_plugin_method`) |
+| `tool` | Yes | Tool to invoke (e.g., `my_plugin_action`, `store_value`) |
 | `args` | No | Arguments to pass to the tool |
 | `expect` | No | Natural language expectation |
 | `analyze` | No | Additional analysis instructions for the LLM |
@@ -280,9 +281,9 @@ steps:
       value: "http://localhost:8000"
 
   - name: "Make API call"
-    tool: http_get
+    tool: my_api_fetch_users
     args:
-      url: ${stored.base_url}/api/users
+      base_url: ${stored.base_url}
     expect: "Should fetch users"
 ```
 
@@ -331,11 +332,9 @@ steps:
       value: "Bearer abc123"
 
   - name: "Make authenticated request"
-    tool: http_get
+    tool: my_api_fetch_protected
     args:
-      url: "http://api.example.com/protected"
-      headers:
-        Authorization: ${stored.auth_token}
+      token: ${stored.auth_token}
     expect: "Should access protected resource"
 
   - name: "Verify stored values"
@@ -369,13 +368,13 @@ test:
 
 steps:
   - name: "Quick health check"
-    tool: http_get
-    args: {url: "http://localhost:8000/health"}
+    tool: my_api_health
+    args: {}
     timeout: 5  # Fast timeout for simple check
     expect: "Should respond quickly"
 
   - name: "Long running operation"
-    tool: process_large_dataset
+    tool: data_processor_run
     args: {size: 10000}
     timeout: 300  # 5 minutes for heavy operation
     expect: "Should complete processing"
@@ -388,8 +387,8 @@ Automatically retry failed steps with configurable delay:
 ```yaml
 steps:
   - name: "Wait for service to be ready"
-    tool: http_get
-    args: {url: "http://localhost:8000/ready"}
+    tool: my_api_check_ready
+    args: {}
     retry: 5        # Try up to 5 times
     retry_delay: 2.0  # Wait 2 seconds between attempts
     expect: "Service should become ready"
@@ -410,17 +409,20 @@ steps:
 
 ## Built-in Tools
 
+The framework provides minimal built-in tools focused on orchestration.
+All other functionality should be provided by project-specific plugins.
+
 | Tool | Description |
 |------|-------------|
-| `http_get` | Make HTTP GET request |
-| `http_post` | Make HTTP POST request |
-| `sleep` | Wait for seconds |
-| `assert_equals` | Compare two values |
-| `assert_true` | Check condition |
-| `compare_values` | Compare with tolerance |
-| `store_value` | Store a value with a name |
-| `get_value` | Retrieve a stored value |
-| `list_values` | List all stored values |
+| `store_value` | Store a value: `{name: "key", value: ...}` |
+| `get_value` | Retrieve a stored value: `{name: "key"}` |
+| `list_values` | List all stored keys |
+| `sleep` | Wait for seconds: `{seconds: 1.5}` |
+
+**Why so minimal?** The framework's philosophy is that the LLM analyzes
+actual data returned by tools. Utility functions like HTTP or assertions
+don't fit this model - they belong in project-specific plugins where they
+can return rich, analyzable data tailored to your use case.
 
 ## Project-Specific Plugins
 
@@ -586,7 +588,7 @@ The framework is LLM-agnostic with a pluggable provider architecture:
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ MCP Server (started by LLM)                                  │
-│ Built-in: http_get, http_post, sleep, assert_*, store_*     │
+│ Built-in: store_value, get_value, list_values, sleep        │
 │ Plugins:  <project>_* (auto-discovered from tests/llm/plugins/)│
 └──────────────────────────────┬──────────────────────────────┘
                                │
@@ -676,14 +678,14 @@ steps:
 # ERROR: Invalid timeout type
 steps:
   - name: "Bad timeout"
-    tool: http_get
+    tool: my_plugin_action
     timeout: "thirty"  # Must be a number
 # Fix: Use timeout: 30
 
 # ERROR: Unknown field
 steps:
   - name: "Unknown field"
-    tool: http_get
+    tool: my_plugin_action
     wait_for: ready  # 'wait_for' is not a valid field
 # Fix: Remove unknown field or check spelling
 ```
@@ -780,10 +782,10 @@ pytest tests/llm/test_example.yaml --llm -v --llm-verbose
 
 Output shows:
 ```
-[tool] mcp__llm_pytest__http_get({"url": "http://localhost:8000/health"})
-[tool result] OK: {"status_code": 200, "body": "..."}
-[stored] auth_token = "Bearer abc123"
-[interpolate] ${stored.auth_token} -> "Bearer abc123"
+[tool] mcp__llm_pytest__my_api_create_user({"name": "Alice", "email": "alice@example.com"})
+[tool result] OK: {"id": 42, "name": "Alice", "email": "alice@example.com"}
+[tool] mcp__llm_pytest__store_value({"name": "user_id", "value": 42})
+[interpolate] ${stored.user_id} -> 42
 ```
 
 ## Advantages
