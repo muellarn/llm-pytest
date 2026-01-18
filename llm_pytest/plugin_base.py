@@ -7,15 +7,15 @@ Example plugin:
 
     from llm_pytest import LLMPlugin
 
-    class ChartTestPlugin(LLMPlugin):
-        name = "chart_test"
+    class DatabasePlugin(LLMPlugin):
+        name = "database"
 
-        async def start_dashboard(self, port: int = 8085) -> dict:
-            '''Start the dashboard server.'''
+        async def connect(self, connection_string: str) -> dict:
+            '''Connect to the database.'''
             ...
 
-        async def get_state(self) -> dict:
-            '''Get current chart state.'''
+        async def query(self, sql: str) -> dict:
+            '''Execute a SQL query and return results.'''
             ...
 """
 

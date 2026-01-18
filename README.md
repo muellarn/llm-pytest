@@ -23,10 +23,10 @@ assert len(data) > 0
 
 You write:
 ```yaml
-expect: "Response should contain candle data with timestamps in ascending order"
+expect: "Response should contain user records with valid email addresses"
 analyze: |
-  Look at the actual timestamps returned. Are they sequential?
-  Are there any gaps? Is the data range what we requested?
+  Look at the actual data returned. Are all emails properly formatted?
+  Are there any duplicates? Is the pagination working correctly?
 ```
 
 **The LLM sees the actual data** and uses its intelligence to determine if it's correct. This catches issues that traditional tests miss:
@@ -38,24 +38,24 @@ analyze: |
 
 **BAD - Just checking for success (LLM learns nothing):**
 ```yaml
-- name: "Zoom in"
-  tool: chart.zoom_in
-  args: {factor: 0.5}
-  expect: "Zoom should complete"
+- name: "Fetch users"
+  tool: api.get_users
+  args: {limit: 10}
+  expect: "Request should complete"
 ```
 
 **GOOD - LLM analyzes the actual output:**
 ```yaml
-- name: "Zoom in"
-  tool: chart.zoom_in
-  args: {factor: 0.5}
-  expect: "Visible range should be halved, centered on the same point"
+- name: "Fetch users"
+  tool: api.get_users
+  args: {limit: 10}
+  expect: "Response should contain exactly 10 users with valid data"
   analyze: |
-    Check the before/after ranges in the output:
-    1. Is the new duration approximately 50% of the old duration?
-    2. Is the center point the same (within 1% tolerance)?
-    3. Did the resolution change if we crossed a threshold?
-    4. Are the cached candles covering the new visible range?
+    Check the returned user data:
+    1. Does the response contain exactly 10 users?
+    2. Does each user have required fields (id, email, name)?
+    3. Are all email addresses properly formatted?
+    4. Are the IDs unique?
 
     Report any anomalies you observe in the data.
 ```
@@ -66,39 +66,39 @@ When writing MCP plugins for llm-pytest, **return rich data for analysis**:
 
 ```python
 # BAD - Returns minimal info, LLM can't verify anything
-async def zoom_in(self, factor: float) -> dict:
-    self._do_zoom(factor)
+async def create_user(self, name: str, email: str) -> dict:
+    self._db.insert({"name": name, "email": email})
     return {"status": "ok"}
 
 # GOOD - Returns data for LLM to analyze
-async def zoom_in(self, factor: float) -> dict:
-    old_range = self._visible_range.copy()
-    self._do_zoom(factor)
-    new_range = self._visible_range
+async def create_user(self, name: str, email: str) -> dict:
+    user_id = self._db.insert({"name": name, "email": email})
+    created_user = self._db.get(user_id)
+    total_users = self._db.count()
 
     return {
-        "before": {
-            "range_start": old_range["from"],
-            "range_end": old_range["to"],
-            "duration_days": (old_range["to"] - old_range["from"]) / 86400,
+        "created_user": {
+            "id": user_id,
+            "name": created_user["name"],
+            "email": created_user["email"],
+            "created_at": created_user["created_at"],
         },
-        "after": {
-            "range_start": new_range["from"],
-            "range_end": new_range["to"],
-            "duration_days": (new_range["to"] - new_range["from"]) / 86400,
+        "validation": {
+            "email_valid": "@" in email and "." in email,
+            "name_not_empty": len(name.strip()) > 0,
         },
-        "expected_center": (old_range["from"] + old_range["to"]) / 2,
-        "actual_center": (new_range["from"] + new_range["to"]) / 2,
-        "cache_state": self._get_cache_summary(),
-        "sample_candles": [...],  # Actual data points for verification
+        "database_state": {
+            "total_users": total_users,
+            "user_exists": created_user is not None,
+        },
     }
 ```
 
 The LLM then analyzes this data and can spot issues like:
-- Center drift that accumulates over multiple zooms
-- Cache not covering the visible range
-- Duration not matching the expected factor
-- Timestamps out of order in the cache
+- User created but with invalid email format
+- Missing required fields in the response
+- Database state inconsistencies
+- Timestamps not being set correctly
 
 ## Features
 
@@ -198,13 +198,13 @@ For loops and repeated operations:
 
 ```yaml
 steps:
-  - name: "Zoom in 5 times"
+  - name: "Create 5 test users"
     repeat: 5
     steps:
-      - tool: chart_test_zoom_in
-        args: {factor: 0.5}
-        expect: "Range halves each time"
-        save_as: zoom_step
+      - tool: database_create_user
+        args: {name: "Test User", email: "test@example.com"}
+        expect: "User created successfully each time"
+        save_as: created_user
 ```
 
 ## Built-in Tools
@@ -411,6 +411,28 @@ Increase timeout in the test YAML or via CLI:
 ```bash
 pytest tests/llm/ --llm --llm-timeout 300
 ```
+
+### Tests hang forever (no output)
+
+**This is likely the stdin bug.** When running Claude Code CLI as a subprocess, it hangs indefinitely if stdin is not closed. The framework handles this automatically, but if you're implementing a custom LLM client or debugging:
+
+**Symptoms:**
+- Test hangs with no output
+- Process doesn't respond to timeout
+- Works fine when running `claude` manually in terminal
+
+**Cause:** Claude Code CLI waits for user input even in non-interactive mode.
+
+**Solution:** Always use `stdin=subprocess.DEVNULL` when spawning Claude:
+```python
+subprocess.run(
+    ["claude", "-p", prompt, ...],
+    stdin=subprocess.DEVNULL,  # CRITICAL!
+    ...
+)
+```
+
+See: https://github.com/anthropics/claude-code/issues/1292
 
 ### Verbose debugging
 

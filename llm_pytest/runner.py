@@ -111,6 +111,16 @@ def run_llm_test(
 
     Returns:
         Verdict object with test results
+
+    Warning:
+        **Claude Code CLI stdin behavior**: The Claude Code CLI will hang
+        indefinitely if stdin is not explicitly closed or redirected from
+        /dev/null. This is a known behavior of the CLI when run as a
+        subprocess. This function handles this automatically by using
+        ``stdin=subprocess.DEVNULL``, but if you're implementing a custom
+        LLM client, you must ensure stdin is properly closed.
+
+        See: https://github.com/anthropics/claude-code/issues/1292
     """
     effective_timeout = timeout if timeout else spec.test.timeout
     project_root = _find_project_root(yaml_path)
@@ -164,10 +174,23 @@ def run_llm_test(
     try:
         if verbose:
             # Use stream-json for real-time output
-            # IMPORTANT: stdin must be closed or from /dev/null, otherwise claude hangs
+            #
+            # CRITICAL: Claude Code CLI stdin behavior
+            # =========================================
+            # The Claude Code CLI hangs indefinitely if stdin is not closed.
+            # This is because the CLI waits for potential user input even when
+            # running non-interactively. Always use stdin=subprocess.DEVNULL
+            # or explicitly close stdin after process creation.
+            #
+            # Symptoms of this bug:
+            # - Test hangs forever with no output
+            # - Process doesn't respond to timeout
+            # - Works fine when run manually in terminal
+            #
+            # See: https://github.com/anthropics/claude-code/issues/1292
             process = subprocess.Popen(
                 base_cmd + ["--output-format", "stream-json", "--verbose"],
-                stdin=subprocess.DEVNULL,  # Critical: close stdin
+                stdin=subprocess.DEVNULL,  # CRITICAL: prevents CLI hang
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -258,9 +281,10 @@ def run_llm_test(
             result.stderr = ""
         else:
             # Non-verbose: capture output silently with JSON format
+            # See verbose block above for explanation of stdin=DEVNULL
             result = subprocess.run(
                 base_cmd + ["--output-format", "json"],
-                stdin=subprocess.DEVNULL,  # Critical: close stdin
+                stdin=subprocess.DEVNULL,  # CRITICAL: prevents CLI hang (see above)
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
