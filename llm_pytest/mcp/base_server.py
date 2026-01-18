@@ -48,6 +48,10 @@ except ImportError:
 
 server = Server("llm_pytest")
 
+# Session-scoped storage for values persisted across test steps
+# This is module-level to allow state to persist across tool calls within a session
+_stored_values: dict[str, Any] = {}
+
 
 @server.tool()
 async def http_get(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
@@ -232,23 +236,47 @@ async def compare_values(
 
 @server.tool()
 async def store_value(name: str, value: Any) -> dict[str, Any]:
-    """Store a value for later retrieval.
+    """Store a value for later retrieval within this test session.
 
-    Note: This is a placeholder - actual state management
-    happens in the LLM's context.
+    Use this to save results from one step for use in later steps.
+    Values are cleared when the test session ends.
 
     Args:
         name: Name to store the value under
         value: The value to store
 
     Returns:
-        Confirmation of storage
+        Dict with stored name and value type
     """
-    return {
-        "stored": True,
-        "name": name,
-        "value_type": type(value).__name__,
-    }
+    _stored_values[name] = value
+    return {"stored": name, "type": type(value).__name__}
+
+
+@server.tool()
+async def get_value(name: str, default: Any = None) -> dict[str, Any]:
+    """Retrieve a previously stored value.
+
+    Returns the stored value or the default if not found.
+
+    Args:
+        name: Name of the value to retrieve
+        default: Default value if not found (defaults to None)
+
+    Returns:
+        Dict with name, value, and whether it was found
+    """
+    value = _stored_values.get(name, default)
+    return {"name": name, "value": value, "found": name in _stored_values}
+
+
+@server.tool()
+async def list_values() -> dict[str, Any]:
+    """List all stored value names in this test session.
+
+    Returns:
+        Dict with list of names and count
+    """
+    return {"names": list(_stored_values.keys()), "count": len(_stored_values)}
 
 
 def main():
