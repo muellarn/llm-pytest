@@ -1,6 +1,6 @@
 # llm-pytest
 
-LLM-orchestrated testing framework for pytest. Write tests in YAML with natural language expectations - Claude Code executes and evaluates them.
+LLM-orchestrated testing framework for pytest. Write tests in YAML with natural language expectations - an LLM executes and evaluates them.
 
 ## Philosophy: Data-Driven Analysis, Not Just Pass/Fail
 
@@ -102,11 +102,16 @@ The LLM then analyzes this data and can spot issues like:
 
 ## Features
 
+- **LLM-agnostic architecture** - pluggable LLM providers (Claude Code is default)
 - **Data-driven analysis** - LLM examines actual output values
 - **Natural language expectations** instead of hard assertions
+- **Variable interpolation** - reference previous results with `${variable}` syntax
+- **State persistence** - store and retrieve values across steps
+- **Per-step timeout and retry** - fine-grained control over step execution
 - **Iterative problem detection** - LLM can identify patterns across steps
 - **Automatic MCP configuration** - no manual `claude mcp add` required
 - **Plugin system** for project-specific tools
+- **Thread-safe** - supports parallel execution with pytest-xdist
 - **No API costs** - Claude Code calls itself as subprocess
 - **pytest-compatible** - integrates with standard pytest workflow
 
@@ -168,7 +173,7 @@ test:
   name: "Test Name"
   description: "What this test verifies"
   tags: ["api", "health"]
-  timeout: 120  # seconds
+  timeout: 120  # seconds (test-level default)
 
 setup:
   - tool: tool_name
@@ -182,6 +187,9 @@ steps:
     expect: "What should happen"
     save_as: result_name
     analyze: "Additional analysis instructions"
+    timeout: 30        # Per-step timeout (overrides test-level)
+    retry: 3           # Retry attempts on failure
+    retry_delay: 2.0   # Delay between retries (seconds)
 
 teardown:
   - tool: tool_name
@@ -191,6 +199,20 @@ verdict:
   pass_if: "Conditions for passing"
   fail_if: "Conditions for failing"
 ```
+
+### Step Fields Reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | No | Human-readable step description |
+| `tool` | Yes | Tool to invoke (e.g., `http_get`, `my_plugin_method`) |
+| `args` | No | Arguments to pass to the tool |
+| `expect` | No | Natural language expectation |
+| `analyze` | No | Additional analysis instructions for the LLM |
+| `save_as` | No | Save result under this name for later reference |
+| `timeout` | No | Per-step timeout in seconds (overrides test-level) |
+| `retry` | No | Number of retry attempts on failure |
+| `retry_delay` | No | Delay between retries in seconds (default: 1.0) |
 
 ### Nested Steps with Repeat
 
@@ -207,6 +229,185 @@ steps:
         save_as: created_user
 ```
 
+## Variable Interpolation
+
+The framework supports variable interpolation using `${variable}` syntax. This allows you to reference values from previous steps or stored values.
+
+### Syntax
+
+| Pattern | Description |
+|---------|-------------|
+| `${step_name.field}` | Access a field from a previous step's result |
+| `${step_name.nested.field}` | Access nested fields with dot notation |
+| `${stored.name}` | Access a value saved with `store_value` |
+
+### Examples
+
+**Referencing previous step results:**
+
+```yaml
+steps:
+  - name: "Create user"
+    tool: api_create_user
+    args:
+      name: "John Doe"
+      email: "john@example.com"
+    save_as: new_user
+    expect: "User should be created"
+
+  - name: "Fetch created user"
+    tool: api_get_user
+    args:
+      user_id: ${new_user.id}  # Use the ID from the previous step
+    expect: "Should return the same user"
+
+  - name: "Update user email"
+    tool: api_update_user
+    args:
+      user_id: ${new_user.id}
+      email: ${new_user.email}_updated  # String concatenation
+    expect: "Email should be updated"
+```
+
+**Using stored values:**
+
+```yaml
+steps:
+  - name: "Store test config"
+    tool: store_value
+    args:
+      name: "base_url"
+      value: "http://localhost:8000"
+
+  - name: "Make API call"
+    tool: http_get
+    args:
+      url: ${stored.base_url}/api/users
+    expect: "Should fetch users"
+```
+
+**Accessing nested fields:**
+
+```yaml
+steps:
+  - name: "Get user details"
+    tool: api_get_user
+    args: {user_id: 123}
+    save_as: user_response
+
+  - name: "Check user address"
+    tool: validate_address
+    args:
+      city: ${user_response.data.address.city}
+      zip: ${user_response.data.address.zip_code}
+    expect: "Address should be valid"
+```
+
+## State Persistence
+
+The framework provides tools for storing and retrieving values across test steps. This is useful for:
+- Sharing computed values between steps
+- Building up test state incrementally
+- Storing configuration values
+
+### Built-in State Tools
+
+| Tool | Description |
+|------|-------------|
+| `store_value` | Store a value with a name |
+| `get_value` | Retrieve a stored value (with optional default) |
+| `list_values` | List all stored values |
+
+### Examples
+
+**Store and retrieve values:**
+
+```yaml
+steps:
+  - name: "Store API token"
+    tool: store_value
+    args:
+      name: "auth_token"
+      value: "Bearer abc123"
+
+  - name: "Make authenticated request"
+    tool: http_get
+    args:
+      url: "http://api.example.com/protected"
+      headers:
+        Authorization: ${stored.auth_token}
+    expect: "Should access protected resource"
+
+  - name: "Verify stored values"
+    tool: list_values
+    expect: "Should show auth_token in the list"
+```
+
+**Using get_value with default:**
+
+```yaml
+steps:
+  - name: "Get optional config"
+    tool: get_value
+    args:
+      name: "retry_count"
+      default: 3
+    save_as: config
+    expect: "Should return default if not set"
+```
+
+## Per-Step Timeout and Retry
+
+### Per-Step Timeout
+
+Override the test-level timeout for specific steps that need more or less time:
+
+```yaml
+test:
+  name: "Mixed timing test"
+  timeout: 60  # Default for all steps
+
+steps:
+  - name: "Quick health check"
+    tool: http_get
+    args: {url: "http://localhost:8000/health"}
+    timeout: 5  # Fast timeout for simple check
+    expect: "Should respond quickly"
+
+  - name: "Long running operation"
+    tool: process_large_dataset
+    args: {size: 10000}
+    timeout: 300  # 5 minutes for heavy operation
+    expect: "Should complete processing"
+```
+
+### Retry Logic
+
+Automatically retry failed steps with configurable delay:
+
+```yaml
+steps:
+  - name: "Wait for service to be ready"
+    tool: http_get
+    args: {url: "http://localhost:8000/ready"}
+    retry: 5        # Try up to 5 times
+    retry_delay: 2.0  # Wait 2 seconds between attempts
+    expect: "Service should become ready"
+
+  - name: "Flaky external API"
+    tool: external_api_call
+    args: {endpoint: "/data"}
+    retry: 3
+    retry_delay: 1.0
+    expect: "Should eventually succeed"
+```
+
+**Retry behavior:**
+- The step is executed up to `retry + 1` times (initial attempt + retries)
+- After each failure, the framework waits `retry_delay` seconds
+- If all attempts fail, the step is marked as failed
+- The LLM sees the final result (success or last failure)
+
 ## Built-in Tools
 
 | Tool | Description |
@@ -217,6 +418,9 @@ steps:
 | `assert_equals` | Compare two values |
 | `assert_true` | Check condition |
 | `compare_values` | Compare with tolerance |
+| `store_value` | Store a value with a name |
+| `get_value` | Retrieve a stored value |
+| `list_values` | List all stored values |
 
 ## Project-Specific Plugins
 
@@ -329,6 +533,30 @@ verdict:
 
 ## Architecture
 
+### LLM Provider Abstraction
+
+The framework is LLM-agnostic with a pluggable provider architecture:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ LLMProvider (Abstract Base)                                  │
+│ ├── execute(prompt, tools, timeout) -> LLMResponse          │
+│ └── cleanup()                                                │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+           ▼                   ▼                   ▼
+┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+│ ClaudeCodeProvider│ │ Future: OpenAI  │ │ Future: Others  │
+│ (Default)         │ │ Provider        │ │                  │
+└──────────────────┘ └──────────────────┘ └──────────────────┘
+```
+
+**Claude Code** is the default provider. The architecture allows adding new LLM providers without changing the core framework.
+
+### Execution Flow
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ pytest --llm tests/llm/                                      │
@@ -339,15 +567,16 @@ verdict:
 ┌─────────────────────────────────────────────────────────────┐
 │ llm-pytest Framework                                         │
 │ ├── plugin.py      (pytest collector for YAML)              │
-│ ├── runner.py      (calls claude -p with --mcp-config)      │
+│ ├── runner.py      (orchestrates LLM execution)             │
+│ ├── providers/     (LLM provider implementations)           │
 │ ├── mcp_server.py  (unified MCP server, loads plugins)      │
 │ └── plugin_base.py (LLMPlugin base class)                   │
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
+│ LLM Provider (e.g., Claude Code)                             │
 │ claude -p "<prompt>" --mcp-config /tmp/...json               │
-│ Claude Code executes as subprocess                           │
 │ - Reads test definition from prompt                         │
 │ - Executes each step via MCP tools                          │
 │ - Analyzes results with natural language                    │
@@ -356,8 +585,8 @@ verdict:
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ MCP Server (started by Claude)                               │
-│ Built-in: http_get, http_post, sleep, assert_*              │
+│ MCP Server (started by LLM)                                  │
+│ Built-in: http_get, http_post, sleep, assert_*, store_*     │
 │ Plugins:  <project>_* (auto-discovered from tests/llm/plugins/)│
 └──────────────────────────────┬──────────────────────────────┘
                                │
@@ -370,24 +599,99 @@ verdict:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Thread Safety
+
+The framework is designed for parallel test execution with pytest-xdist:
+
+- **Unique MCP configs**: Each test gets a unique temporary MCP configuration file
+- **Isolated state**: State persistence is scoped to individual test runs
+- **No shared resources**: Plugins are instantiated per-test
+
+```bash
+# Run tests in parallel
+pytest tests/llm/ --llm -n auto
+```
+
 ## How It Works (Detailed)
 
 1. **pytest discovers YAML files** when `--llm` flag is used
-2. **For each test file**, llm-pytest:
-   - Parses YAML into `TestSpec` model
+2. **YAML schema validation** ensures test files are correctly formatted
+3. **For each test file**, llm-pytest:
+   - Parses YAML into `TestSpec` model with validation
    - Discovers plugins from `tests/llm/plugins/`
-   - Creates temporary MCP config file pointing to unified server
+   - Creates unique temporary MCP config file
+   - Applies variable interpolation to step arguments
    - Renders prompt from Jinja2 template
-3. **Calls Claude Code** with:
+4. **Calls LLM provider** (default: Claude Code) with:
    ```bash
    claude -p "<prompt>" \
-     --mcp-config /tmp/llm_pytest_mcp_config.json \
+     --mcp-config /tmp/llm_pytest_mcp_config_<unique>.json \
      --allowedTools "mcp__llm_pytest__*" \
      --output-format stream-json
    ```
-4. **Claude executes test steps** using MCP tools
-5. **Claude returns JSON verdict** with pass/fail and explanation
-6. **pytest reports** based on verdict
+5. **LLM executes test steps** using MCP tools
+   - Per-step timeouts are enforced
+   - Failed steps are retried according to `retry` setting
+   - Results are saved for variable interpolation
+6. **LLM returns JSON verdict** with pass/fail and explanation
+7. **pytest reports** based on verdict
+
+## Framework Tests
+
+The llm-pytest framework includes comprehensive tests for its core modules:
+
+```bash
+# Run all framework tests
+pytest llm-pytest/tests/ -v
+
+# Run with coverage
+pytest llm-pytest/tests/ --cov=llm_pytest --cov-report=term-missing
+
+# Run specific test module
+pytest llm-pytest/tests/test_runner.py -v
+```
+
+The test suite covers:
+- YAML parsing and schema validation
+- Variable interpolation
+- State persistence
+- Retry logic
+- Timeout handling
+- Plugin discovery and loading
+- LLM provider abstraction
+
+## YAML Schema Validation
+
+The framework validates YAML test files and provides helpful error messages:
+
+**Common validation errors:**
+
+```yaml
+# ERROR: Missing required 'tool' field
+steps:
+  - name: "Bad step"
+    args: {foo: bar}
+# Fix: Add 'tool' field
+
+# ERROR: Invalid timeout type
+steps:
+  - name: "Bad timeout"
+    tool: http_get
+    timeout: "thirty"  # Must be a number
+# Fix: Use timeout: 30
+
+# ERROR: Unknown field
+steps:
+  - name: "Unknown field"
+    tool: http_get
+    wait_for: ready  # 'wait_for' is not a valid field
+# Fix: Remove unknown field or check spelling
+```
+
+**Validation provides:**
+- Clear error messages pointing to the problem
+- Suggestions for common mistakes
+- Line numbers when available
 
 ## Troubleshooting
 
@@ -412,6 +716,14 @@ Increase timeout in the test YAML or via CLI:
 pytest tests/llm/ --llm --llm-timeout 300
 ```
 
+Or use per-step timeouts for specific slow steps:
+```yaml
+steps:
+  - name: "Slow operation"
+    tool: slow_tool
+    timeout: 120  # This step gets more time
+```
+
 ### Tests hang forever (no output)
 
 **This is likely the stdin bug.** When running Claude Code CLI as a subprocess, it hangs indefinitely if stdin is not closed. The framework handles this automatically, but if you're implementing a custom LLM client or debugging:
@@ -434,6 +746,31 @@ subprocess.run(
 
 See: https://github.com/anthropics/claude-code/issues/1292
 
+### Variable interpolation not working
+
+Check that:
+1. The referenced step has `save_as` defined
+2. The variable name matches exactly (case-sensitive)
+3. The field path is correct for nested access
+
+```yaml
+# Correct
+- name: "Step A"
+  tool: some_tool
+  save_as: step_a_result  # Define save_as
+
+- name: "Step B"
+  tool: other_tool
+  args:
+    value: ${step_a_result.field}  # Reference correctly
+```
+
+### Retry not working as expected
+
+- Retries only happen on step failure (tool returns error)
+- `retry: 3` means 3 retry attempts (4 total attempts)
+- Check that `retry_delay` is a number, not a string
+
 ### Verbose debugging
 
 Use `--llm-verbose` to see all tool calls and results:
@@ -445,10 +782,13 @@ Output shows:
 ```
 [tool] mcp__llm_pytest__http_get({"url": "http://localhost:8000/health"})
 [tool result] OK: {"status_code": 200, "body": "..."}
+[stored] auth_token = "Bearer abc123"
+[interpolate] ${stored.auth_token} -> "Bearer abc123"
 ```
 
 ## Advantages
 
+- **LLM-agnostic** - pluggable provider architecture
 - **No API costs** - Claude Code calls itself as subprocess
 - **Natural language** - Tests read like documentation
 - **Flexible** - LLM handles unexpected situations gracefully
@@ -457,6 +797,9 @@ Output shows:
 - **pytest-compatible** - Standard pytest workflow
 - **Auto-discovery** - Plugins loaded automatically from `tests/llm/plugins/`
 - **Auto MCP config** - No manual `claude mcp add` required
+- **Thread-safe** - Works with pytest-xdist parallel execution
+- **Rich interpolation** - Reference previous results easily
+- **Retry support** - Handle flaky tests gracefully
 
 ## License
 
